@@ -472,16 +472,23 @@ class NPFDeepLearningPanel(QWidget):
         
         algo_info_text = (
             "<h3>Automated NPF Identification</h3>"
-            "<p>This panel utilises a deep learning image classification algorithm developed by Kecorius et al. (2024) to automatically identify regional NPF events. The exact procedure involves three steps:</p>"
-            "<ol>"
-            "<li><b>Image generation:</b> The algorithm converts 1-hour resolution particle number size distribution (PNSD) data into daily contour plots.</li>"
-            "<li><b>Pattern recognition:</b> A ResNet-50 convolutional neural network scans these images to detect 'banana-shaped' structures, which are indicative of regional new particle formation and growth.</li>"
-            "<li><b>Classification:</b> Each day is categorised as an 'NPF' event, a 'non-NPF' day, or 'bad data' (e.g., missing or non-continuous measurements). By default, only events with a confidence score >75% are accepted as NPF days.</li>"
-            "</ol>"
-            "<p>In the original study, the model demonstrated robust reliability, achieving an AUC of 0.99 and an F1 score of 0.93.</p>"
-            "<p>Once the model has finished running, this panel allows you to manually verify the identified NPF events and subsequently calculate growth rates (GR), formation rates (J), and the condensational sink (CS).</p>"
-            "<p><i>Calculated Growth Rates (GR) use the linear fit GR = dDp / dt</i><br>"
-        )
+            "<div style='border: 1px solid #ccc; padding: 10px; margin-bottom: 15px;'>" # Adds a visual container for the note
+            "<strong>Note:</strong> Requires the <code>NPF_CNN_model.pkl</code> file from "
+            "<a href='https://doi.org/10.1038/s41597-024-04079-1'>Kecorius et al. (2024)</a>. "
+            "Download the .7z archive from the 'Code Availability' section and place the .pkl file in: "
+            "<code>PyNSD/models/NPF_CNN_model.pkl</code>."
+            "</div>"
+            "<p>This tool uses a ResNet-50 deep learning algorithm to automatically identify regional New Particle Formation (NPF) events via a three-step process:</p>"
+            "<ul>"
+            "<li><b>Image Generation:</b> Converts hourly PNSD data into daily contour plots.</li>"
+            "<li><b>Pattern Recognition:</b> Scans for 'banana-shaped' growth structures.</li>"
+            "<li><b>Classification:</b> Categorises days as 'NPF', 'Non-NPF', or 'Bad Data'. "
+            "By default, a confidence threshold of >75% is applied.</li>"
+            "</ul>"
+            "<p>The model is highly reliable, originally reporting an AUC of 0.99 and an F1 score of 0.93. "
+            "After processing, you can manually verify events and calculate growth rates ($GR = dD_p / dt$), "
+            "formation rates ($J$), and the condensational sink ($CS$).</p>"
+    )
         dl_layout.addWidget(QLabel("Algorithm Details:"))                    
         self.btn_algo_info = QPushButton("ℹ️")                               
         self.btn_algo_info.setFixedSize(24, 24)                              
