@@ -1,14 +1,18 @@
-import os                                                                        
-import numpy as np                                                               
-import pandas as pd                                                              
-from scipy import stats, signal                                                  
-import matplotlib.dates as mdates                                                
-import matplotlib.pyplot as plt                                                  
-from matplotlib.figure import Figure                                             
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg                  
-from matplotlib.colors import LogNorm                                            
-from matplotlib.widgets import RectangleSelector                                 
-from matplotlib import rcParams                                                  
+from __future__ import annotations
+
+import os
+import tempfile
+import numpy as np
+import pandas as pd
+from scipy import stats, signal
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import copy
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.colors import LogNorm
+from matplotlib.widgets import RectangleSelector
+from matplotlib import rcParams
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -16,9 +20,9 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QMessageBox, QGroupBox, QLineEdit, QFileDialog,
                              QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QInputDialog)
 
-from utils.calculations import (calc_condensation_sink, calc_coagulation_sink,   
+from utils.calculations import (calc_condensation_sink, calc_coagulation_sink, 
                                 calc_formation_rate, fit_modes_to_pnsd, calc_growth_rate,
-                                calculate_j1_5, calculate_m)                     # Import J1.5 and m functions
+                                calculate_j1_5, calculate_m)
 
 try:
     from fastai.vision.all import load_learner                                       
@@ -41,7 +45,7 @@ class CoagSWindow(QDialog):
     def __init__(self, day_df, diams, dlogdp, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Coagulation Matrix Analysis")                       
-        self.resize(1200, 600)                                                   # Widened to fit two plots
+        self.resize(1200, 600)                                                   
         self.day_df = day_df                                                     
         self.diams = diams                                                       
         self.dlogdp = dlogdp                                                     
@@ -53,29 +57,24 @@ class CoagSWindow(QDialog):
         self.canvas = FigureCanvasQTAgg(self.fig)                                
         layout.addWidget(self.canvas)                                            
 
-        # Create a 1x2 grid of subplots with shared axes
         ax1, ax2 = self.fig.subplots(1, 2, sharex=True, sharey=True)                                           
         pnsd = self.day_df.to_numpy()                                            
         
         coags_matrix = calc_coagulation_sink(self.diams, pnsd, self.dlogdp)      
 
         dates = mdates.date2num(self.day_df.index)                               
-        coags_safe = np.clip(coags_matrix, 1e-7, None)                           # Prevent log(0) and div(0) errors
+        coags_safe = np.clip(coags_matrix, 1e-7, None)                           
         
-        # Calculate lifetime in hours (1 / CoagS gives seconds, divide by 3600 for hours)
         lifetime_hours = 1.0 / (coags_safe * 3600.0)
 
-        # Plot 1: Coagulation Sink
         mesh1 = ax1.pcolormesh(dates, self.diams, coags_safe.T, cmap='inferno', norm=LogNorm(), shading='nearest') 
         ax1.set_yscale('log')                                                    
         ax1.set_ylabel("Diameter (nm)")                                          
         ax1.xaxis.set_major_locator(mdates.HourLocator(interval=4))              
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))             
-        self.fig.colorbar(mesh1, ax=ax1, label="CoagS (s⁻¹)")               
+        self.fig.colorbar(mesh1, ax=ax1, label="CoagS (s⁻¹)")                
         ax1.set_title("Coagulation Sink", fontweight='bold') 
 
-        # Plot 2: Coagulation Lifetime
-        # Using 'viridis' to visually distinguish it from the sink plot
         mesh2 = ax2.pcolormesh(dates, self.diams, lifetime_hours.T, cmap='viridis', norm=LogNorm(), shading='nearest') 
         ax2.xaxis.set_major_locator(mdates.HourLocator(interval=4))              
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))             
@@ -107,9 +106,9 @@ class MLClassifierWorker(QThread):
             learner = load_learner(self.model_path)                                  
             results = []
             
-            class_map = {'NPF': 'NPF', 'NO': 'non-NPF', 'BAD': 'bad data'}           
+            class_map = {'NPF': 'NPF', 'NO': 'non-NPF', 'BAD': 'bad data'}            
             
-            groups = list(self.df.groupby(self.df.index.date))                       
+            groups = list(self.df.groupby(self.df.index.date))                        
             total_days = len(groups)
             
             debug_dir = os.path.join(os.getcwd(), "ML_contour_plots")
@@ -213,7 +212,6 @@ class MLClassifierWorker(QThread):
         mpl.rcParams['font.family'] = orig_font                             
         mpl.rcParams['xtick.direction'] = orig_tick                         
         mpl.rcParams['ytick.direction'] = orig_tick                         
-        
 
 class MLSummaryWindow(QDialog):
     def __init__(self, raw_df, diams, results_df, parent=None):
@@ -248,7 +246,7 @@ class MLSummaryWindow(QDialog):
         gs = self.fig.add_gridspec(2, 3, height_ratios=[1, 1.5], hspace=0.3, wspace=0.3)
         
         ax_freq = self.fig.add_subplot(gs[0, :])
-        monthly = self.results.groupby([pd.Grouper(freq='MS'), 'class']).size().unstack(fill_value=0)
+        monthly = self.results.groupby([pd.Grouper(freq='ME'), 'class']).size().unstack(fill_value=0)
         colors = {'NPF': '#d62728', 'non-NPF': '#1f77b4', 'bad data': '#7f7f7f'}
         bottom = np.zeros(len(monthly))
         
@@ -318,7 +316,7 @@ class DiurnalSummaryWindow(QDialog):
         d_m = self.diams * 1e-9                                              
         vol_m3 = (np.pi / 6.0) * (d_m ** 3)                                  
         mass_kg_m3 = np.sum(N_cm3 * 1e6 * vol_m3 * 1.5e3, axis=1)            
-        return np.sum(N_cm3, axis=1), mass_kg_m3 * 1e9                        
+        return np.sum(N_cm3, axis=1), mass_kg_m3 * 1e9                       
 
     def _plot_diurnals(self):
         gs = self.fig.add_gridspec(4, 2, hspace=0.4, wspace=0.15)
@@ -435,6 +433,22 @@ class NPFDeepLearningPanel(QWidget):
         info.setText(text)
         info.exec()
 
+    def _update_ascii_art(self, pct, text):
+        monkey = f"""
+         {'_' * (len(text) + 2)}
+        < {text} >
+         {'-' * (len(text) + 2)}
+                \\    .-"-.
+                 \\  _/.-.-.\\_
+                   ( ( o o ) )
+                    |/  "  \\|
+                     \\ .-. /  _
+                     /`\"\"\"`\\ //
+                    /       //
+        Progress: {pct}%
+        """
+        self.ascii_label.setText(monkey)
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
         
@@ -472,7 +486,7 @@ class NPFDeepLearningPanel(QWidget):
         
         algo_info_text = (
             "<h3>Automated NPF Identification</h3>"
-            "<div style='border: 1px solid #ccc; padding: 10px; margin-bottom: 15px;'>" # Adds a visual container for the note
+            "<div style='border: 1px solid #ccc; padding: 10px; margin-bottom: 15px;'>" 
             "<strong>Note:</strong> Requires the <code>NPF_CNN_model.pkl</code> file from "
             "<a href='https://doi.org/10.1038/s41597-024-04079-1'>Kecorius et al. (2024)</a>. "
             "Download the .7z archive from the 'Code Availability' section and place the .pkl file in: "
@@ -488,7 +502,7 @@ class NPFDeepLearningPanel(QWidget):
             "<p>The model is highly reliable, originally reporting an AUC of 0.99 and an F1 score of 0.93. "
             "After processing, you can manually verify events and calculate growth rates ($GR = dD_p / dt$), "
             "formation rates ($J$), and the condensational sink ($CS$).</p>"
-    )
+        )
         dl_layout.addWidget(QLabel("Algorithm Details:"))                    
         self.btn_algo_info = QPushButton("ℹ️")                               
         self.btn_algo_info.setFixedSize(24, 24)                              
@@ -617,16 +631,16 @@ class NPFDeepLearningPanel(QWidget):
         j_layout.addWidget(QLabel("J Bounds: Min")); self.j_min_dp = QLineEdit("10"); self.j_min_dp.setFixedWidth(30); j_layout.addWidget(self.j_min_dp)
         j_layout.addWidget(QLabel("Max")); self.j_max_dp = QLineEdit("20"); self.j_max_dp.setFixedWidth(30); j_layout.addWidget(self.j_max_dp)
         
-        self.chk_j15 = QCheckBox("Calc J1.5")                                    # New J1.5 Checkbox
-        j_layout.addWidget(self.chk_j15)                                         # Add to layout
+        self.chk_j15 = QCheckBox("Calc J1.5")                                    
+        j_layout.addWidget(self.chk_j15)                                         
 
         self.btn_calc_j = QPushButton("✨Calc J & CS"); self.btn_calc_j.clicked.connect(self.calculate_j_and_cs); j_layout.addWidget(self.btn_calc_j)
         self.btn_set_csv = QPushButton("📁Choose CSV"); self.btn_set_csv.clicked.connect(self._choose_new_csv); j_layout.addWidget(self.btn_set_csv)
         self.btn_export = QPushButton("💾Send to CSV"); self.btn_export.clicked.connect(self.export_to_csv); j_layout.addWidget(self.btn_export)
         
-        self.btn_coags_map = QPushButton("🔥CoagS Map")                         # New Heatmap button
-        self.btn_coags_map.clicked.connect(self._show_coags_map)                 # Connect to pop-up
-        j_layout.addWidget(self.btn_coags_map)                                   # Add to layout
+        self.btn_coags_map = QPushButton("🔥CoagS Map")                          
+        self.btn_coags_map.clicked.connect(self._show_coags_map)                 
+        j_layout.addWidget(self.btn_coags_map)                                   
 
         self.btn_diurnals = QPushButton("☀️🌑Show Diurnals"); self.btn_diurnals.clicked.connect(self._show_diurnals); j_layout.addWidget(self.btn_diurnals)
         
@@ -644,7 +658,7 @@ class NPFDeepLearningPanel(QWidget):
         
         ctrl_layout.addLayout(j_layout)
 
-        self.csv_table = QTableWidget(0, 13)                                     # Expand to 13 columns
+        self.csv_table = QTableWidget(0, 13)                                     
         self.csv_table.setHorizontalHeaderLabels(["Date", "Class", "In Window", "J_Window", "Mode Dp", "GR", "J", "J[dNdt]", "J[GR]", "J[coag]", "CS", "m", "J1.5"])
         self.csv_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         ctrl_layout.addWidget(self.csv_table)
@@ -676,7 +690,7 @@ class NPFDeepLearningPanel(QWidget):
         self._update_ascii_art(0, "Initialising model...")
         thresh = self.thresh_slider.value() / 100.0
         
-        f_name = getattr(self, 'file_name', 'Dataset')                                           
+        f_name = getattr(self, 'file_name', 'Dataset')                                                   
         self.worker = MLClassifierWorker(self.df, self.diams, self.model_path, thresh, f_name)   
         
         self.worker.progress.connect(self._update_ascii_art)
@@ -899,10 +913,10 @@ class NPFDeepLearningPanel(QWidget):
             if not hasattr(self, 'points'): self.points = [] 
             if len(self.points) < 2:                                             
                 self.points.append((xdata, ydata)) 
-                self.btn_pick.setText(f"Click plot ({len(self.points)}/2)")      
+                self.btn_pick.setText(f"Click plot ({len(self.points)}/2)")     
                 
                 x_vals = [p[0] for p in self.points]; y_vals = [p[1] for p in self.points] 
-                if getattr(self, 'scatter_pts', None): self.scatter_pts.remove()                   
+                if getattr(self, 'scatter_pts', None): self.scatter_pts.remove()                    
                 self.scatter_pts = self.ax_hm.scatter(x_vals, y_vals, color='white', marker='x', s=100, zorder=5) 
                 
                 if len(self.points) == 2:                                        
@@ -972,12 +986,12 @@ class NPFDeepLearningPanel(QWidget):
             'date': self.day_df.index, 
             'Class': "Non-NPF", 
             'In_GR_Window': 0,
-            'J_Window': "N/A",                                                   # Empty string for safety
+            'J_Window': "N/A",                                                           
             'Mode_Dp': np.nan, 
             'GR': np.nan, 'J': np.nan, 'J[dNdt]': np.nan, 'J[GR]': np.nan, 'J[coag]': np.nan, 
             'CS': cs_series,
-            'm': np.nan,                                                         # NA placeholders
-            'J1.5': np.nan                                                       # NA placeholders
+            'm': np.nan,                                                                 
+            'J1.5': np.nan                                                               
         }).set_index('date')
 
         self.ax_j.clear(); self.ax_cs.clear(); self.ax_reg.clear(); self.canvas_reg.draw()
@@ -1014,28 +1028,28 @@ class NPFDeepLearningPanel(QWidget):
             dlogdp = float(self.val_dlogdp.text())
         except ValueError: return QMessageBox.warning(self, "Input Error", "Inputs must be numbers.")
         
-        j_window_str = f"{j_min}-{j_max}"                                        # Format the window string
+        j_window_str = f"{j_min}-{j_max}"                                        
         pnsd = self.day_df.to_numpy()
         cs_series = calc_condensation_sink(self.diams, pnsd, dlogdp)
         coags_matrix = calc_coagulation_sink(self.diams, pnsd, dlogdp)
         j_total, dN_dt, gr_term, coag_term = calc_formation_rate(self.diams, pnsd, dlogdp, gr_to_use, j_min, j_max, coags_matrix)
         
-        m_series = np.full_like(j_total, np.nan)                                 # Empty array for m
-        j15_series = np.full_like(j_total, np.nan)                               # Empty array for J1.5
+        m_series = np.full_like(j_total, np.nan)                                 
+        j15_series = np.full_like(j_total, np.nan)                               
         
-        if self.chk_j15.isChecked() and gr_to_use > 0:                           # Execute J1.5 maths
-            idx_d1 = np.argmin(np.abs(self.diams - 1.5))                         # Locate 1.5nm bin
-            idx_dx = np.argmin(np.abs(self.diams - j_min))                       # Locate lower bound bin
+        if self.chk_j15.isChecked() and gr_to_use > 0:                           
+            idx_d1 = np.argmin(np.abs(self.diams - 1.5))                         
+            idx_dx = np.argmin(np.abs(self.diams - j_min))                       
             
-            coags_d1_series = coags_matrix[:, idx_d1]                            # Slice exact CoagS
-            coags_dx_series = coags_matrix[:, idx_dx]                            # Slice exact CoagS
+            coags_d1_series = coags_matrix[:, idx_d1]                            
+            coags_dx_series = coags_matrix[:, idx_dx]                            
             
-            if j_min != 1.5:                                                     # Prevent zero division
+            if j_min != 1.5:                                                     
                 m_series = calculate_m(coags_d1_series, coags_dx_series, 1.5, j_min)
-                m_safe = np.where(m_series == -1, -0.999, m_series)              # Safety net
+                m_safe = np.where(m_series == -1, -0.999, m_series)              
                 j15_series = calculate_j1_5(1.5, j_total, j_min, coags_d1_series * 3600, gr_to_use, m_safe)
             else:
-                j15_series = j_total                                             # Output directly if identical
+                j15_series = j_total                                             
         
         dates = mdates.date2num(self.day_df.index)
         mode_dps = np.full(len(dates), np.nan)                                       
@@ -1066,17 +1080,17 @@ class NPFDeepLearningPanel(QWidget):
         }).set_index('date')
         
         self.ax_j.clear(); self.ax_cs.clear(); time_axis = self.day_df.index
-        self.ax_j.plot(time_axis, j_total, color='blue', label='J')              # Plot standard J
+        self.ax_j.plot(time_axis, j_total, color='blue', label='J')              
         
         if self.chk_j15.isChecked():
-            self.ax_j.plot(time_axis, j15_series, color='purple', linestyle='--', label='J1.5') # Plot J1.5 overlay
+            self.ax_j.plot(time_axis, j15_series, color='purple', linestyle='--', label='J1.5') 
             
         self.ax_j.set_ylabel("Formation Rate (J)", color='blue'); self.ax_j.tick_params(axis='y', colors='blue'); self.ax_j.spines['left'].set_color('blue')
         self.ax_cs.plot(time_axis, cs_series, color='orange', label='CS'); self.ax_cs.set_ylabel("Condensational Sink (CS)", color='orange')
         self.ax_cs.yaxis.set_label_position("right"); self.ax_cs.yaxis.tick_right(); self.ax_cs.tick_params(axis='y', colors='orange'); self.ax_cs.spines['right'].set_color('orange')
         
-        self.ax_j.legend(loc='upper left')                                       # Legend
-        self.ax_cs.legend(loc='upper right')                                     # Legend
+        self.ax_j.legend(loc='upper left')                                       
+        self.ax_cs.legend(loc='upper right')                                     
         
         if len(time_axis) > 1: self.ax_j.set_xlim([time_axis[0], time_axis[-1]])
         self.ax_j.xaxis.set_major_locator(mdates.HourLocator(interval=4)); self.ax_j.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
@@ -1094,18 +1108,18 @@ class NPFDeepLearningPanel(QWidget):
         if not self.last_csv_path: 
             path, _ = QFileDialog.getSaveFileName(self, "Append or Save Analysis to CSV", "", "CSV Files (*.csv)")
             if not path: return
-            self.last_csv_path = path                                                
+            self.last_csv_path = path                                            
             self.btn_export.setText(f"Send to CSV ({os.path.basename(path)})")       
             
         path = self.last_csv_path 
         
         try:
-            if os.path.exists(path):                                             # PANDAS CONCAT MAGIC
-                existing_df = pd.read_csv(path, index_col=0, parse_dates=True)   # Read existing CSV
-                combined_df = pd.concat([existing_df, self.j_cs_data])           # Safe merge
-                combined_df.to_csv(path)                                         # Export merged
+            if os.path.exists(path):                                             
+                existing_df = pd.read_csv(path, index_col=0, parse_dates=True)   
+                combined_df = pd.concat([existing_df, self.j_cs_data])           
+                combined_df.to_csv(path)                                         
             else:
-                self.j_cs_data.to_csv(path)                                      # Standard write           
+                self.j_cs_data.to_csv(path)                                      
             
             for index, row in self.j_cs_data.iterrows():
                 r_idx = self.csv_table.rowCount()                                    
@@ -1126,7 +1140,7 @@ class NPFDeepLearningPanel(QWidget):
                 self.csv_table.setItem(r_idx, 11, QTableWidgetItem(fmt(row['m'], '.3f')))
                 self.csv_table.setItem(r_idx, 12, QTableWidgetItem(fmt(row['J1.5'], '.3e')))
         except Exception as e: 
-            QMessageBox.critical(self, "Error", str(e))                              
+            QMessageBox.critical(self, "Error", str(e))                             
 
     def _show_diurnals(self):
         try:
@@ -1140,7 +1154,7 @@ class NPFDeepLearningPanel(QWidget):
         self.diurnal_win = DiurnalSummaryWindow(self.df, self.diams, dummy_ml, j_min, j_max, dlogdp, self) 
         self.diurnal_win.show()
 
-    def _show_coags_map(self):                                                   # Call heatmap tool
+    def _show_coags_map(self):                                                   
         if self.df is None: return
         try: dlogdp = float(self.val_dlogdp.text())
         except ValueError: return QMessageBox.warning(self, "Error", "dlogDp must be a number.")
