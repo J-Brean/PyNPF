@@ -602,6 +602,24 @@ class NPFPanel(QWidget):
         info.setText(text)
         info.exec()
 
+    def _get_active_df(self):
+        # Returns the dataframe for the current day, or 48h if enabled
+        plot_df = self.day_df
+        if self.chk_two_day.isChecked() and self.current_day_idx < len(self.daily_groups) - 1:
+            _, next_df = self.daily_groups[self.current_day_idx + 1]
+            plot_df = pd.concat([self.day_df, next_df])
+        return plot_df
+
+    def _safe_remove(self, attr_name):
+        # Safely removes a matplotlib artist and sets it to None
+        artist = getattr(self, attr_name, None)
+        if artist:
+            try:
+                artist.remove()
+            except:
+                pass # Artist likely cleared by ax.clear()
+            setattr(self, attr_name, None)
+
     def export_plots(self):
         # 1. Heatmap
         def restore_hm():
@@ -695,8 +713,18 @@ class NPFPanel(QWidget):
         
         nav_layout.addWidget(QLabel("Min:")); self.cbar_min = QLineEdit("1"); self.cbar_min.setFixedWidth(40)
         nav_layout.addWidget(self.cbar_min)
-        nav_layout.addWidget(QLabel("Max:")); self.cbar_max = QLineEdit(""); self.cbar_max.setFixedWidth(40)
+        nav_layout.addWidget(QLabel("Max:")); self.cbar_max = QLineEdit("100000"); self.cbar_max.setFixedWidth(40)
         nav_layout.addWidget(self.cbar_max)
+        
+        nav_layout.addSpacing(10)
+        self.chk_two_day = QCheckBox("48h View"); self.chk_two_day.setChecked(True)
+        self.chk_two_day.stateChanged.connect(self.update_heatmap)
+        nav_layout.addWidget(self.chk_two_day)
+        
+        nav_layout.addWidget(QLabel("Dp Min:")); self.ymin_dp = QLineEdit(""); self.ymin_dp.setFixedWidth(30)
+        nav_layout.addWidget(self.ymin_dp)
+        nav_layout.addWidget(QLabel("Max:")); self.ymax_dp = QLineEdit(""); self.ymax_dp.setFixedWidth(30)
+        nav_layout.addWidget(self.ymax_dp)
         
         nav_layout.addWidget(QLabel("dlogDp:"))                                      
         self.val_dlogdp = QLineEdit(""); self.val_dlogdp.setFixedWidth(40)           
@@ -843,8 +871,8 @@ class NPFPanel(QWidget):
         
         ctrl_layout.addLayout(j_layout)
 
-        self.csv_table = QTableWidget(0, 13)
-        self.csv_table.setHorizontalHeaderLabels(["Date", "Class", "In Window", "J_Window", "Mode Dp", "GR", "J", "J[dNdt]", "J[GR]", "J[coag]", "CS", "m", "J1.5"])
+        self.csv_table = QTableWidget(0, 14)
+        self.csv_table.setHorizontalHeaderLabels(["Date", "Class", "NPF Start", "In Window", "J_Window", "Mode Dp", "GR", "J", "J[dNdt]", "J[GR]", "J[coag]", "CS", "m", "J1.5"])
         self.csv_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         ctrl_layout.addWidget(self.csv_table)
         bot_layout.addWidget(ctrl_panel, stretch=1)
@@ -868,6 +896,9 @@ class NPFPanel(QWidget):
         log_diams = np.log10(self.diams)
         default_dlogdp = np.mean(np.diff(log_diams)) if len(log_diams) > 1 else 1.0  
         self.val_dlogdp.setText(f"{default_dlogdp:.3f}") 
+        
+        self.ymin_dp.setText(f"{self.diams.min():.1f}")
+        self.ymax_dp.setText(f"{self.diams.max():.1f}")
         
         self.daily_groups = list(self.df.groupby(self.df.index.date))                
         
@@ -894,7 +925,7 @@ class NPFPanel(QWidget):
         self.gr_result = None; self.j_cs_data = None; self.fit_snapshots = []
         self.slider_browse.setEnabled(False)
         
-        if getattr(self, 'scatter_overlay', None): self.scatter_overlay.remove(); self.scatter_overlay = None
+        self._safe_remove('scatter_overlay')
         self.val_gr.setText("")
         self.ax_reg.clear(); self.ax_browse.clear(); self.ax_j.clear(); self.ax_cs.clear()
         self.canvas_reg.draw(); self.canvas_browse.draw(); self.canvas_diur.draw()
@@ -911,8 +942,12 @@ class NPFPanel(QWidget):
         self.ax_hm.clear(); self.ax_hm_line.clear(); self.ax_hm_line.patch.set_visible(False)
         self.ax_hm.set_zorder(1); self.ax_hm_line.set_zorder(2)
         
-        dates = mdates.date2num(self.day_df.index)
-        pnsd_safe = np.clip(self.day_df.to_numpy(), 1e-4, None)
+        # Get active dataframe (24h or 48h)
+        plot_df = self._get_active_df()
+        is_48h = self.chk_two_day.isChecked()
+            
+        dates = mdates.date2num(plot_df.index)
+        pnsd_safe = np.clip(plot_df.to_numpy(), 1e-4, None)
         
         try: v_min = float(self.cbar_min.text())
         except ValueError: v_min = 1.0
@@ -920,16 +955,38 @@ class NPFPanel(QWidget):
         except ValueError: v_max = pnsd_safe.max()
         if v_max <= v_min: v_max = v_min * 10
         
-        self.ax_hm.pcolormesh(dates, self.diams, pnsd_safe.T, cmap=self.cmap_combo.currentText(), shading='nearest', norm=LogNorm(vmin=v_min, vmax=v_max))
+        mesh = self.ax_hm.pcolormesh(dates, self.diams, pnsd_safe.T, cmap=self.cmap_combo.currentText(), shading='nearest', norm=LogNorm(vmin=v_min, vmax=v_max))
         self.ax_hm.set_yscale('log'); self.ax_hm.set_ylabel("Diameter (nm)")
+        
+        if not hasattr(self, 'cbar_hm'):
+            self.cbar_hm = self.fig_hm.colorbar(mesh, ax=self.ax_hm, label="dN/dlogDp")
+        else:
+            try:
+                self.cbar_hm.update_normal(mesh)
+            except:
+                self.cbar_hm = self.fig_hm.colorbar(mesh, ax=self.ax_hm, label="dN/dlogDp")
+
         if len(dates) > 1: self.ax_hm.set_xlim([dates[0], dates[-1]])
-        self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(interval=4))
-        self.ax_hm.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-        self.ax_hm.set_ylim([self.diams.min(), self.diams.max()])
+        
+        # Adjust tick interval based on 24h vs 48h
+        if is_48h:
+            self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(interval=6))
+            self.ax_hm.xaxis.set_major_formatter(mdates.DateFormatter('%d %H:%M'))
+        else:
+            self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(interval=4))
+            self.ax_hm.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+            
+        # Apply manual Y-limits if possible
+        try: 
+            y_min = float(self.ymin_dp.text()); y_max = float(self.ymax_dp.text())
+        except ValueError: 
+            y_min, y_max = self.diams.min(), self.diams.max()
+        if y_max <= y_min: y_min, y_max = self.diams.min(), self.diams.max()
+        self.ax_hm.set_ylim([y_min, y_max])
         
         log_d = np.log10(self.diams); dlogdp = np.mean(np.diff(log_d)) if len(log_d) > 1 else 1.0
         tot_n = np.sum(pnsd_safe, axis=1) * dlogdp
-        self.ax_hm_line.plot(dates, tot_n, color='red', alpha=0.6)
+        self.ax_hm_line.plot(dates, tot_n, color='red', alpha=0.3)
         self.ax_hm_line.set_ylabel("Total N", color='red')
         self.ax_hm_line.yaxis.set_label_position("right")                            
         self.ax_hm_line.yaxis.tick_right()
@@ -961,9 +1018,9 @@ class NPFPanel(QWidget):
 
     def _clear_points(self):
         self.points = []
-        if getattr(self, 'scatter_pts', None): self.scatter_pts.remove(); self.scatter_pts = None
-        if getattr(self, 'line_fit', None): self.line_fit.remove(); self.line_fit = None
-        if getattr(self, 'scatter_overlay', None): self.scatter_overlay.remove(); self.scatter_overlay = None
+        self._safe_remove('scatter_pts')
+        self._safe_remove('line_fit')
+        self._safe_remove('scatter_overlay')
         
         self.val_gr.setText("")
         self.btn_pick.setChecked(False); self.btn_pick.setText("Select Points"); self.picking_points = False
@@ -983,12 +1040,13 @@ class NPFPanel(QWidget):
         if not getattr(self, 'last_box_bounds', None): return
         t_min, t_max, d_min, d_max = self.last_box_bounds
         
-        dates = mdates.date2num(self.day_df.index)
+        plot_df = self._get_active_df()
+        dates = mdates.date2num(plot_df.index)
         t_mask = (dates >= t_min) & (dates <= t_max)
         d_mask = (self.diams >= d_min) & (self.diams <= d_max)
         if not np.any(t_mask) or not np.any(d_mask): return
         
-        subset_pnsd = self.day_df.iloc[t_mask, d_mask].to_numpy()
+        subset_pnsd = plot_df.iloc[t_mask, d_mask].to_numpy()
         sub_dates = dates[t_mask]
         active_diams = self.diams[d_mask]
         limit_jump = self.chk_limit_jump.isChecked()
@@ -1002,7 +1060,7 @@ class NPFPanel(QWidget):
         mode_diams = np.array(mode_diams)
         self.fit_snapshots = [(valid_dates[i], snap[0], snap[1], snap[2]) for i, snap in enumerate(snapshots)]
         
-        if getattr(self, 'scatter_overlay', None): self.scatter_overlay.remove()
+        self._safe_remove('scatter_overlay')
         self.scatter_overlay = self.ax_hm.scatter(valid_dates, mode_diams, c='magenta', marker='x', s=40, zorder=3)
         self.ax_hm.set_ylim([self.diams.min(), self.diams.max()]); self.canvas_hm.draw_idle()
         
@@ -1027,7 +1085,8 @@ class NPFPanel(QWidget):
         if getattr(self, 'refining_modes', False):
             if not getattr(self, 'last_box_bounds', None): return
             t_min, t_max, _, _ = self.last_box_bounds
-            dates = mdates.date2num(self.day_df.index)
+            plot_df = self._get_active_df()
+            dates = mdates.date2num(plot_df.index)
             sub_dates = dates[(dates >= t_min) & (dates <= t_max)] 
             
             if len(sub_dates) == 0: return
@@ -1043,7 +1102,7 @@ class NPFPanel(QWidget):
                 self.btn_pick.setText(f"Click plot ({len(self.points)}/2)")      
                 
                 x_vals = [p[0] for p in self.points]; y_vals = [p[1] for p in self.points] 
-                if getattr(self, 'scatter_pts', None): self.scatter_pts.remove()                   
+                self._safe_remove('scatter_pts')
                 self.scatter_pts = self.ax_hm.scatter(x_vals, y_vals, color='white', marker='x', s=100, zorder=5) 
                 
                 if len(self.points) == 2:                                        
@@ -1051,7 +1110,7 @@ class NPFPanel(QWidget):
                     self.btn_pick.setChecked(False)
                     self.btn_pick.setText("Select Points")
                     if getattr(self, 'selector', None): self.selector.set_active(True) 
-                    if getattr(self, 'line_fit', None): self.line_fit.remove()       
+                    self._safe_remove('line_fit')
                     self.line_fit, = self.ax_hm.plot(x_vals, y_vals, color='white', linestyle='--', lw=2) 
                     self._calculate_growth_rate()
                 self.canvas_hm.draw()
@@ -1109,6 +1168,7 @@ class NPFPanel(QWidget):
         self.j_cs_data = pd.DataFrame({
             'date': self.day_df.index, 
             'Class': "Non-NPF", 
+            'NPF_start_date': self.day_df.index[0].date(),
             'In_GR_Window': 0,
             'J_Window': "N/A",
             'Mode_Dp': np.nan, 
@@ -1141,11 +1201,15 @@ class NPFPanel(QWidget):
         else:
             active_class = "Undefined"
         
-        gr_to_use = self.gr_result
-        if active_class == "Burst" and (self.gr_result is None or np.isnan(self.gr_result)):
-            gr_to_use = 1.0  
-        elif self.gr_result is None or np.isnan(self.gr_result):
-            return QMessageBox.warning(self, "No GR", "Calculate GR first.")
+        # Default to 1.0 if no fit done, as requested
+        gr_to_use = self.gr_result if (self.gr_result is not None and not np.isnan(self.gr_result)) else 1.0
+        
+        # NPF Start Date logic
+        start_date = self.day_df.index[0].date()
+        if getattr(self, 'fit_snapshots', None) and len(self.fit_snapshots) > 0:
+            # Use the actual timestamp of the first fitted point
+            first_time_num = self.fit_snapshots[0][0]
+            start_date = mdates.num2date(first_time_num).date()
             
         try: 
             j_min = float(self.j_min_dp.text()); j_max = float(self.j_max_dp.text())
@@ -1194,6 +1258,7 @@ class NPFPanel(QWidget):
         self.j_cs_data = pd.DataFrame({
             'date': self.day_df.index, 
             'Class': active_class,
+            'NPF_start_date': start_date,
             'In_GR_Window': in_window,
             'J_Window': j_window_str,
             'Mode_Dp': mode_dps, 
@@ -1227,6 +1292,9 @@ class NPFPanel(QWidget):
             self.btn_export.setText(f"Send to CSV ({os.path.basename(path)})")
 
     def export_to_csv(self):
+        if self.j_cs_data is None:
+            self.calculate_j_and_cs()
+            
         if self.j_cs_data is None: return
         
         if not self.last_csv_path: 
@@ -1252,17 +1320,18 @@ class NPFPanel(QWidget):
                 
                 self.csv_table.setItem(r_idx, 0, QTableWidgetItem(str(index)))
                 self.csv_table.setItem(r_idx, 1, QTableWidgetItem(str(row['Class'])))
-                self.csv_table.setItem(r_idx, 2, QTableWidgetItem(str(int(row['In_GR_Window']))))
-                self.csv_table.setItem(r_idx, 3, QTableWidgetItem(str(row['J_Window'])))
-                self.csv_table.setItem(r_idx, 4, QTableWidgetItem(fmt(row['Mode_Dp'], '.2f')))
-                self.csv_table.setItem(r_idx, 5, QTableWidgetItem(fmt(row['GR'], '.3f')))
-                self.csv_table.setItem(r_idx, 6, QTableWidgetItem(fmt(row['J'], '.3e')))
-                self.csv_table.setItem(r_idx, 7, QTableWidgetItem(fmt(row['J[dNdt]'], '.3e')))
-                self.csv_table.setItem(r_idx, 8, QTableWidgetItem(fmt(row['J[GR]'], '.3e')))
-                self.csv_table.setItem(r_idx, 9, QTableWidgetItem(fmt(row['J[coag]'], '.3e')))
-                self.csv_table.setItem(r_idx, 10, QTableWidgetItem(fmt(row['CS'], '.3e')))
-                self.csv_table.setItem(r_idx, 11, QTableWidgetItem(fmt(row['m'], '.3f')))
-                self.csv_table.setItem(r_idx, 12, QTableWidgetItem(fmt(row['J1.5'], '.3e')))
+                self.csv_table.setItem(r_idx, 2, QTableWidgetItem(str(row['NPF_start_date'])))
+                self.csv_table.setItem(r_idx, 3, QTableWidgetItem(str(int(row['In_GR_Window']))))
+                self.csv_table.setItem(r_idx, 4, QTableWidgetItem(str(row['J_Window'])))
+                self.csv_table.setItem(r_idx, 5, QTableWidgetItem(fmt(row['Mode_Dp'], '.2f')))
+                self.csv_table.setItem(r_idx, 6, QTableWidgetItem(fmt(row['GR'], '.3f')))
+                self.csv_table.setItem(r_idx, 7, QTableWidgetItem(fmt(row['J'], '.3e')))
+                self.csv_table.setItem(r_idx, 8, QTableWidgetItem(fmt(row['J[dNdt]'], '.3e')))
+                self.csv_table.setItem(r_idx, 9, QTableWidgetItem(fmt(row['J[GR]'], '.3e')))
+                self.csv_table.setItem(r_idx, 10, QTableWidgetItem(fmt(row['J[coag]'], '.3e')))
+                self.csv_table.setItem(r_idx, 11, QTableWidgetItem(fmt(row['CS'], '.3e')))
+                self.csv_table.setItem(r_idx, 12, QTableWidgetItem(fmt(row['m'], '.3f')))
+                self.csv_table.setItem(r_idx, 13, QTableWidgetItem(fmt(row['J1.5'], '.3e')))
         except Exception as e: 
             QMessageBox.critical(self, "Error", str(e))                              
 
