@@ -734,6 +734,11 @@ class NPFPanel(QWidget):
         self.btn_redraw.clicked.connect(self.update_heatmap)
         nav_layout.addWidget(self.btn_redraw)
         
+        self.chk_48h = QCheckBox("48h Mode")
+        self.chk_48h.setToolTip("Show current day + next day (48 hours) in the heatmap")
+        self.chk_48h.stateChanged.connect(lambda: self.update_day())
+        nav_layout.addWidget(self.chk_48h)
+        
         self.btn_export_plots = QPushButton("⤢ Export Plots")
         self.btn_export_plots.clicked.connect(self.export_plots)
         nav_layout.addWidget(self.btn_export_plots)
@@ -915,6 +920,15 @@ class NPFPanel(QWidget):
     def update_day(self):
         if not self.daily_groups: return
         date_obj, self.day_df = self.daily_groups[self.current_day_idx]
+        
+        # 48h mode: concatenate the next day's data if available
+        if getattr(self, 'chk_48h', None) and self.chk_48h.isChecked():
+            if self.current_day_idx < len(self.daily_groups) - 1:
+                _, next_day_df = self.daily_groups[self.current_day_idx + 1]
+                self.day_df = pd.concat([self.day_df, next_day_df])
+            else:
+                self.chk_48h.setChecked(False)  # can't extend past last day
+        
         self.date_dropdown.blockSignals(True)
         self.date_dropdown.setCurrentIndex(self.current_day_idx)
         self.date_dropdown.blockSignals(False)

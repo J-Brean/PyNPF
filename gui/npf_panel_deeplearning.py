@@ -157,60 +157,51 @@ class MLClassifierWorker(QThread):
             self.error.emit(str(exc))
 
     def _generate_temp_plot(self, day_df, save_path):
-        import matplotlib as mpl                                            
-        import copy                                                         
-        
-        orig_font = mpl.rcParams['font.family']                             
-        orig_tick = mpl.rcParams['xtick.direction']                         
-        
-        mpl.rcParams['font.family'] = 'sans-serif'                          
-        mpl.rcParams['font.sans-serif'] = ['Arial']                         
-        mpl.rcParams['xtick.direction'] = 'in'                              
-        mpl.rcParams['ytick.direction'] = 'in'                              
-        
-        fig = plt.figure(figsize=(6, 6), dpi=100)                           
-        ax = fig.add_axes([0.15, 0.15, 0.7, 0.7])                           
-        
-        day_df = day_df.groupby(day_df.index.hour).mean()                   
-        day_df = day_df.reindex(range(24))                                  
-        day_df = day_df.bfill(limit=1).ffill(limit=1).fillna(1e-4)          
-        
-        pnsd_log = np.log10(np.clip(day_df.values, 1.0, None))              
-        log_diams = np.log10(self.diams)                                    
-        time_centers = np.arange(0.5, 24.5)                                 
-        
-        cmap = copy.copy(mpl.colormaps['jet'])                              
-        cmap.set_under('black')                                             
-        
-        mesh = ax.pcolormesh(time_centers, log_diams, pnsd_log.T, 
-                             cmap=cmap, vmin=0.0, vmax=5.0, 
-                             shading='nearest')                             
-        
-        ax.set_ylim(log_diams.min(), log_diams.max())                       
-        ax.set_xlim(0, 24)                                                  
-        
-        ax.set_xticks([5, 10, 15, 20])                                      
-        ax.tick_params(axis='x', labelsize=14)                              
-        ax.set_xlabel("X", fontsize=18)                                     
-        
-        potential_y_ticks = [1.0, 1.5, 2.0, 2.5, 3.0]                       
+        import matplotlib as mpl
+        import copy
+
+        orig_font = mpl.rcParams['font.family']
+        orig_tick = mpl.rcParams['xtick.direction']
+
+        mpl.rcParams['font.family'] = 'sans-serif'
+        mpl.rcParams['font.sans-serif'] = ['Arial']
+        mpl.rcParams['xtick.direction'] = 'in'
+        mpl.rcParams['ytick.direction'] = 'in'
+
+        fig = plt.figure(figsize=(6, 6), dpi=100)
+        ax = fig.add_axes([0.15, 0.15, 0.7, 0.7])
+
+        day_df = day_df.groupby(day_df.index.hour).mean()
+        day_df = day_df.reindex(range(24))
+        day_df = day_df.bfill(limit=1).ffill(limit=1).fillna(1e-4)
+
+        pnsd_log = np.log10(np.clip(day_df.values, 1.0, None))
+        log_diams = np.log10(self.diams)
+        time_centers = np.arange(0.5, 24.5)
+
+        cmap = copy.copy(mpl.colormaps['jet'])
+        cmap.set_under('black')
+
+        mesh = ax.pcolormesh(time_centers, log_diams, pnsd_log.T,
+                             cmap=cmap, vmin=0.0, vmax=5.0,
+                             shading='nearest')
+
+        ax.set_ylim(log_diams.min(), log_diams.max())
+        ax.set_xlim(0, 24)
+
+        ax.set_xticks([5, 10, 15, 20])
+        potential_y_ticks = [1.0, 1.5, 2.0, 2.5, 3.0]
         valid_y_ticks = [t for t in potential_y_ticks if log_diams.min() <= t <= log_diams.max()]
-        ax.set_yticks(valid_y_ticks)                                        
-        ax.tick_params(axis='y', labelsize=14)                              
-        ax.set_ylabel("Y", fontsize=18)                                     
-        
-        cbar = fig.colorbar(mesh, ax=ax, pad=0.02, aspect=15)               
-        cbar.set_ticks([0, 1, 2, 3, 4, 5])                                  
-        cbar.ax.tick_params(labelsize=14)                                   
-        
-        fig.patch.set_facecolor('white')                                    
-        ax.set_facecolor('white')                                           
-        
-        fig.savefig(save_path, facecolor='white')                           
-        plt.close(fig)                                                      
-        
-        mpl.rcParams['font.family'] = orig_font                             
-        mpl.rcParams['xtick.direction'] = orig_tick                         
+        ax.set_yticks(valid_y_ticks)
+
+        fig.patch.set_facecolor('white')
+        ax.set_facecolor('white')
+
+        fig.savefig(save_path, facecolor='white')
+        plt.close(fig)
+
+        mpl.rcParams['font.family'] = orig_font
+        mpl.rcParams['xtick.direction'] = orig_tick
         mpl.rcParams['ytick.direction'] = orig_tick                         
 
 class MLSummaryWindow(QDialog):
@@ -717,13 +708,15 @@ class NPFDeepLearningPanel(QWidget):
         self.current_ml_results = results
         
         npf_mask = results['class'] == 'NPF'
-        npf_dates = results[npf_mask].index.date
-        self.daily_groups = [(d, self.df[self.df.index.date == d]) for d in npf_dates]
-        
+        npf_results = results[npf_mask]
+        self.daily_groups = [(idx, self.df[self.df.index.normalize() == idx.normalize()])
+                             for idx in npf_results.index
+                             if len(self.df[self.df.index.normalize() == idx.normalize()]) > 0]
+
         if self.daily_groups:
             self.date_dropdown.blockSignals(True)
             self.date_dropdown.clear()
-            self.date_dropdown.addItems([str(d) for d in npf_dates])
+            self.date_dropdown.addItems([str(d) for d in npf_results.index])
             self.date_dropdown.blockSignals(False)
             for w in [self.btn_prev, self.btn_next, self.date_dropdown]: w.setEnabled(True)
             self.current_day_idx = 0
