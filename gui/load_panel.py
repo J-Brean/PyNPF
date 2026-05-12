@@ -6,15 +6,36 @@ import numpy as np
 import matplotlib.dates as mdates
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-from scipy.interpolate import interp1d                                           
-from PyQt6.QtCore import Qt, pyqtSignal
+from scipy.interpolate import interp1d
+from datetime import datetime, timedelta
+import re
+from PyQt6.QtCore import Qt, pyqtSignal, QDate, QPoint
 from PyQt6.QtGui import QFont, QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame, QGroupBox, QHBoxLayout, 
                              QHeaderView, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea, QSplitter, 
-                             QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QDialog, QMessageBox, QInputDialog)
+                             QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QDialog, QMessageBox, QInputDialog,
+                             QDateEdit, QSpinBox, QCheckBox, QToolTip)
 from gui.file_entry_widget import FileEntryWidget
 from utils.data_loader import (DATE_COLUMN_OPTIONS, DATE_FORMAT_OPTIONS, DEFAULT_DATE_COL, DEFAULT_DATE_FMT, 
                                DataFile, load_pnsd_file, apply_qc_filter, calculate_line_losses, align_bins)
+
+# ─────────────────────────────────────────────────────────────────────────── #
+# Hoverable preview icon label
+# ─────────────────────────────────────────────────────────────────────────── #
+class _PreviewIconLabel(QLabel):
+    """QLabel that shows a rich tooltip reliably via QToolTip.showText on hover."""
+    def __init__(self, tooltip_html: str, parent=None):
+        super().__init__("📄", parent)
+        self._tip = tooltip_html
+
+    def enterEvent(self, event):
+        QToolTip.showText(self.mapToGlobal(QPoint(self.width() + 4, 0)), self._tip, self)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
 
 # ─────────────────────────────────────────────────────────────────────────── #
 # Spline Harmonisation Diagnostic Dialog
@@ -109,8 +130,273 @@ class HarmoniseDialog(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# DateTime Filter Dialog
+# ─────────────────────────────────────────────────────────────────────────── #
+class DateTimeFilterDialog(QDialog):
+    def __init__(self, df: pd.DataFrame, diams: list, parent=None):
+        super().__init__(parent)
+        self.df = df.copy()
+        self.diams = diams
+        self.mask = pd.Series(True, index=df.index)
+        
+        self.setWindowTitle("Filter by Date/Time")
+        self.resize(900, 650)
+        
+        layout = QVBoxLayout(self)
+        
+        # --- Filter Mode Selection ---
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Filter Mode:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Custom Date Range", "By Day of Week", "By Month", "By Hour of Day", "By Year"])
+        self.mode_combo.currentIndexChanged.connect(self.update_controls)
+        mode_layout.addWidget(self.mode_combo)
+        mode_layout.addStretch()
+        layout.addLayout(mode_layout)
+        
+        # --- Dynamic Controls Container ---
+        self.controls_widget = QWidget()
+        self.controls_layout = QVBoxLayout(self.controls_widget)
+        layout.addWidget(self.controls_widget)
+        
+        # --- Visualization Canvas ---
+        self.fig = Figure(figsize=(8, 3))
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        layout.addWidget(self.canvas)
+        
+        # --- Stats Label ---
+        self.stats_label = QLabel()
+        self.stats_label.setStyleSheet("font-weight: bold; color: #333;")
+        layout.addWidget(self.stats_label)
+        
+        # --- Buttons ---
+        btn_box = QHBoxLayout()
+        self.btn_apply = QPushButton("✨ Apply Filter")
+        self.btn_apply.setStyleSheet("font-weight: bold; background-color: #c4d1ba; padding: 8px;")
+        self.btn_apply.clicked.connect(self.accept)
+        btn_box.addStretch()
+        btn_box.addWidget(self.btn_apply)
+        layout.addLayout(btn_box)
+        
+        self.update_controls()
+        
+    def update_controls(self):
+        """Rebuild control panel based on selected filter mode."""
+        # Clear existing controls — items may be widgets OR sub-layouts
+        def _clear_layout(layout):
+            while layout.count():
+                item = layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+                elif item.layout() is not None:
+                    _clear_layout(item.layout())
+        _clear_layout(self.controls_layout)
+        
+        mode = self.mode_combo.currentText()
+        
+        if mode == "Custom Date Range":
+            self._build_date_range_controls()
+        elif mode == "By Day of Week":
+            self._build_dow_controls()
+        elif mode == "By Month":
+            self._build_month_controls()
+        elif mode == "By Hour of Day":
+            self._build_hour_controls()
+        elif mode == "By Year":
+            self._build_year_controls()
+        
+        self.update_filter()
+    
+    def _build_date_range_controls(self):
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Start Date:"))
+        self.date_start = QDateEdit()
+        self.date_start.setDate(QDate(self.df.index.min().year, self.df.index.min().month, self.df.index.min().day))
+        self.date_start.dateChanged.connect(self.update_filter)
+        row.addWidget(self.date_start)
+        
+        row.addWidget(QLabel("End Date:"))
+        self.date_end = QDateEdit()
+        self.date_end.setDate(QDate(self.df.index.max().year, self.df.index.max().month, self.df.index.max().day))
+        self.date_end.dateChanged.connect(self.update_filter)
+        row.addWidget(self.date_end)
+        
+        row.addWidget(QLabel("Action:"))
+        self.action_combo = QComboBox()
+        self.action_combo.addItems(["Keep Inside Range", "Remove Inside Range"])
+        self.action_combo.currentIndexChanged.connect(self.update_filter)
+        row.addWidget(self.action_combo)
+        row.addStretch()
+        
+        self.controls_layout.addLayout(row)
+    
+    def _build_dow_controls(self):
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Keep Days:"))
+        self.dow_checks = {}
+        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        for i, day in enumerate(days):
+            cb = QCheckBox(day)
+            cb.setChecked(True)
+            cb.stateChanged.connect(self.update_filter)
+            self.dow_checks[i] = cb
+            row.addWidget(cb)
+        row.addStretch()
+        self.controls_layout.addLayout(row)
+    
+    def _build_month_controls(self):
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Keep Months:"))
+        self.month_checks = {}
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        for i, month in enumerate(months):
+            cb = QCheckBox(month)
+            cb.setChecked(True)
+            cb.stateChanged.connect(self.update_filter)
+            self.month_checks[i+1] = cb
+            row.addWidget(cb)
+        row.addStretch()
+        self.controls_layout.addLayout(row)
+    
+    def _build_hour_controls(self):
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Hour Range:"))
+        row.addWidget(QLabel("From:"))
+        self.hour_start = QSpinBox()
+        self.hour_start.setRange(0, 23)
+        self.hour_start.setValue(0)
+        self.hour_start.valueChanged.connect(self.update_filter)
+        row.addWidget(self.hour_start)
+        
+        row.addWidget(QLabel("To:"))
+        self.hour_end = QSpinBox()
+        self.hour_end.setRange(0, 23)
+        self.hour_end.setValue(23)
+        self.hour_end.valueChanged.connect(self.update_filter)
+        row.addWidget(self.hour_end)
+        row.addStretch()
+        self.controls_layout.addLayout(row)
+    
+    def _build_year_controls(self):
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Keep Years:"))
+        self.year_checks = {}
+        years = sorted(self.df.index.year.unique())
+        for year in years:
+            cb = QCheckBox(str(year))
+            cb.setChecked(True)
+            cb.stateChanged.connect(self.update_filter)
+            self.year_checks[year] = cb
+            row.addWidget(cb)
+        row.addStretch()
+        self.controls_layout.addLayout(row)
+    
+    def update_filter(self):
+        """Update the filter mask based on current control state."""
+        mode = self.mode_combo.currentText()
+        self.mask = pd.Series(True, index=self.df.index)
+        
+        if mode == "Custom Date Range":
+            start = self.date_start.date().toPyDate()
+            end = self.date_end.date().toPyDate()
+            in_range = (self.df.index.date >= start) & (self.df.index.date <= end)
+            
+            if self.action_combo.currentText() == "Keep Inside Range":
+                self.mask = in_range
+            else:
+                self.mask = ~in_range
+        
+        elif mode == "By Day of Week":
+            selected_days = [day for day, cb in self.dow_checks.items() if cb.isChecked()]
+            self.mask = self.df.index.dayofweek.isin(selected_days)
+        
+        elif mode == "By Month":
+            selected_months = [month for month, cb in self.month_checks.items() if cb.isChecked()]
+            self.mask = self.df.index.month.isin(selected_months)
+        
+        elif mode == "By Hour of Day":
+            start_hr = self.hour_start.value()
+            end_hr = self.hour_end.value()
+            if start_hr <= end_hr:
+                self.mask = (self.df.index.hour >= start_hr) & (self.df.index.hour <= end_hr)
+            else:
+                self.mask = (self.df.index.hour >= start_hr) | (self.df.index.hour <= end_hr)
+        
+        elif mode == "By Year":
+            selected_years = [year for year, cb in self.year_checks.items() if cb.isChecked()]
+            self.mask = self.df.index.year.isin(selected_years)
+        
+        self.update_visualization()
+    
+    def update_visualization(self):
+        """Update the plot showing what will be kept/removed."""
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        
+        # Create a time series showing kept vs removed
+        kept_series = self.mask.astype(int)
+        dates = mdates.date2num(self.df.index)
+        
+        colors = np.where(np.asarray(self.mask, dtype=bool), 'green', 'red')
+        ax.scatter(dates, kept_series, c=colors, s=20, alpha=0.6)
+        ax.set_ylim(-0.5, 1.5)
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(["Remove", "Keep"])
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.figure.autofmt_xdate(rotation=45)
+        ax.set_ylabel("Filter Result")
+        ax.set_title("Date/Time Filter Preview")
+        
+        # Update stats
+        n_keep = self.mask.sum()
+        n_total = len(self.mask)
+        pct = 100 * n_keep / n_total if n_total > 0 else 0
+        self.stats_label.setText(f"Keeping {n_keep}/{n_total} rows ({pct:.1f}%)")
+        
+        self.fig.tight_layout()
+        self.canvas.draw()
+    
+    def get_filtered_data(self):
+        """Return the filtered DataFrame."""
+        return self.df[self.mask]
+    
+    def get_mask(self):
+        """Return the filter mask."""
+        return self.mask
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Load Panel Main Class
 # ─────────────────────────────────────────────────────────────────────────── #
+
+
+def detect_timezone_from_csv(file_path: str) -> str | None:
+    """
+    Auto-detect timezone offset embedded in CSV timestamps.
+    Looks for patterns like: 2022-08-01 12:30:45+02:00 or 2022-08-01T12:30:45-0500
+    Returns a UTC offset string pandas understands (e.g. 'UTC+02:00') or None.
+    """
+    # Match a tz offset that immediately follows a time component (digit or second digit group)
+    # e.g. "...45+02:00"  "...30-05:00"  "...00+0000"
+    tz_in_datetime = re.compile(r'\d{2}([+-])(\d{2}):?(\d{2})$')
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                for token in line.split(','):
+                    token = token.strip().strip('"').strip("'")
+                    m = tz_in_datetime.search(token)
+                    if m:
+                        sign, hh, mm = m.group(1), m.group(2), m.group(3)
+                        h, mn = int(hh), int(mm)
+                        if 0 <= h <= 14 and 0 <= mn < 60:
+                            return f"UTC{sign}{h:02d}:{mn:02d}"
+    except Exception:
+        pass
+    return None
+
+
+
 class LoadPanel(QWidget):
     data_confirmed = pyqtSignal(dict)
     
@@ -318,6 +604,14 @@ class LoadPanel(QWidget):
         norm_row.addWidget(btn_unnorm)
         corr_layout.addLayout(norm_row)
         
+        dt_row = QHBoxLayout()
+        dt_btn = QPushButton("⏰ Filter by Date/Time")
+        dt_btn.clicked.connect(self._run_datetime_filter)
+        dt_row.addWidget(dt_btn)
+        dt_row.addWidget(self._info_btn("Filter data by custom date range, day of week, month, hour of day, or year.", "Date/Time Filter"))
+        dt_row.addStretch()
+        corr_layout.addLayout(dt_row)
+        
         settings_splitter.addWidget(corr_box)
         root.addWidget(settings_splitter)
 
@@ -423,31 +717,35 @@ class LoadPanel(QWidget):
             row_layout = QHBoxLayout(row_widget)                                         # Add layout
             row_layout.setContentsMargins(0, 0, 0, 0)                                    # Strip margins
             
-            info_icon = QLabel("📄")                                                     # Create icon
+            # Build file preview snippet
+            preview_lines = []
+            try:
+                if path.lower().endswith(('.csv', '.txt', '.dat', '.tsv')):
+                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                        for _ in range(8):
+                            try:
+                                line = next(f).strip()
+                                line = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                preview_lines.append(line[:120] + "…" if len(line) > 120 else line)
+                            except StopIteration:
+                                break
+            except Exception as e:
+                preview_lines = [f"Could not read file: {e}"]
+            
+            fname_safe = Path(path).name.replace('&', '&amp;').replace('<', '&lt;')
+            body = "<br/>".join(preview_lines) if preview_lines else "<i>File is empty.</i>"
+            tooltip_html = (
+                f"<html><body style='font-family:Consolas,monospace; font-size:9pt; "
+                f"background:#000000; color:#ffffff; padding:6px; white-space:pre;'>"
+                f"<b style='color:#ffffff;'>📄 {fname_safe}</b><br/>"
+                f"<hr style='border:1px solid #555; margin:3px 0;'/>"
+                f"{body}</body></html>"
+            )
+            info_icon = _PreviewIconLabel(tooltip_html)                                  # Create icon
             info_icon.setFixedSize(24, 24)                                               # Size icon
             info_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)                         # Centre icon
             info_icon.setStyleSheet("background-color: #d1c4ba; border-radius: 4px;")    # Style icon
             info_icon.setCursor(Qt.CursorShape.PointingHandCursor)                       # Add pointer cursor
-            
-            preview_text = "Preview not available for this file type."                   # Fallback text
-            try:
-                if path.lower().endswith(('.csv', '.txt', '.dat', '.tsv')):              # Check format
-                    with open(path, 'r', encoding='utf-8', errors='replace') as f:       # Open safely
-                        lines = []                                                       # Init storage
-                        for _ in range(7):                                               # Grab 7 lines
-                            try:
-                                line = next(f).strip()                                   # Read line
-                                line = line.replace('<', '&lt;').replace('>', '&gt;')    # Stop HTML rendering bugs!
-                                lines.append(line[:80] + "..." if len(line) > 80 else line) # Trim length
-                            except StopIteration: break                                  # End of file
-                        if lines:
-                            preview_text = "RAW FILE PREVIEW:\n" + "\n".join(lines)      # Join lines
-                        else:
-                            preview_text = "File is empty."                              # Empty flag
-            except Exception as e: 
-                preview_text = f"Could not read file preview.\nError: {e}"               # Catch lock errors
-                
-            info_icon.setToolTip(preview_text)                                           # Force tooltip to icon
             
             row_layout.addWidget(info_icon)                                              # Pack icon
             row_layout.addWidget(entry)                                                  # Pack entry
@@ -464,6 +762,11 @@ class LoadPanel(QWidget):
         if path.startswith("MERGED_"):
             if path in self._results: entry.set_result(self._results[path])
             return
+        
+        # Auto-detect timezone from file
+        detected_tz = detect_timezone_from_csv(path)
+        if detected_tz:
+            self._tz_input.setText(detected_tz)
         
         g_col_text = self._col_combo.currentText()
         g_col = self._custom_col.text() if g_col_text == "Custom..." else g_col_text
@@ -774,6 +1077,25 @@ class LoadPanel(QWidget):
         
         self._populate_preview(new_df, diams, "Un-normalised (dN)")
         QMessageBox.information(self, "Yeehaw!", "Data successfully converted back to N! (No normalisation) 🤠🐎")
+
+    def _run_datetime_filter(self):
+        """Open the date/time filter dialog."""
+        df, diams = self._get_active_data()
+        if df is None: return
+        
+        dlg = DateTimeFilterDialog(df, diams, self)
+        
+        if dlg.exec():
+            filtered_df = dlg.get_filtered_data()
+            n_removed = len(df) - len(filtered_df)
+            
+            if self._active_preview_path == "MERGED": 
+                self._merged_df = filtered_df
+            else: 
+                self._results[self._active_preview_path].df = filtered_df
+            
+            self._populate_preview(filtered_df, diams, f"Date/Time Filtered ({n_removed} rows removed)")
+            QMessageBox.information(self, "Filter Applied", f"Successfully filtered data. Removed {n_removed} rows. ✂️")
 
     def _execute_merge(self, mode: str):
         if len(self._selected_paths) >= 2:

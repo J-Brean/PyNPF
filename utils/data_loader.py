@@ -194,12 +194,20 @@ def load_pnsd_file(
 
     try: 
         parsed_dates = pd.to_datetime(raw[dt_col].str.strip(), format=fmt_to_strptime(date_fmt), errors="coerce")
+        
+        # If most timestamps failed to parse (e.g. they contain embedded tz like +02:00 but format has no %z),
+        # fall back to pandas auto-inference which handles tz-aware strings natively.
+        if parsed_dates.isna().mean() > 0.5:
+            parsed_dates = pd.to_datetime(raw[dt_col].str.strip(), errors="coerce", utc=False)
+        
         raw[dt_col] = parsed_dates
         raw_good = raw.dropna(subset=[dt_col]).copy() # Safely drop bad dates BEFORE timezone conversion
         
         if raw_good[dt_col].dt.tz is None: 
             raw_good[dt_col] = raw_good[dt_col].dt.tz_localize(timezone, ambiguous='NaT', nonexistent='NaT')
-        else: 
+        else:
+            # Already tz-aware (embedded in the string) — just convert to the target tz.
+            # This avoids double-applying the timezone.
             raw_good[dt_col] = raw_good[dt_col].dt.tz_convert(timezone)
             
         raw_good = raw_good.dropna(subset=[dt_col]).set_index(dt_col)
