@@ -6,7 +6,7 @@ from scipy.optimize import curve_fit
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.colors import LogNorm
-from matplotlib import rcParams
+from matplotlib import rcParams, cm
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QLineEdit, QComboBox, QSplitter, QTableWidget, 
                              QTableWidgetItem, QHeaderView, QPushButton,
@@ -149,12 +149,12 @@ class SummaryPanel(QWidget):
         
         ctrl_layout.addWidget(QLabel("Min Colour:"))
         self.cbar_min = QLineEdit("1")
-        self.cbar_min.textChanged.connect(lambda: self.update_top())
+        self.cbar_min.editingFinished.connect(lambda: self.update_top())
         ctrl_layout.addWidget(self.cbar_min)
         
         ctrl_layout.addWidget(QLabel("Max Colour:"))
         self.cbar_max = QLineEdit("")
-        self.cbar_max.textChanged.connect(lambda: self.update_top())
+        self.cbar_max.editingFinished.connect(lambda: self.update_top())
         ctrl_layout.addWidget(self.cbar_max)
         
         self.export_btn = QPushButton("Export Plots")
@@ -238,6 +238,23 @@ class SummaryPanel(QWidget):
         self.line_total_n = None
         self.total_n_series = None
 
+    def _insert_time_gaps_for_plot(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Reindex to expected cadence so missing periods become NaN gaps in plots."""
+        if df is None or df.empty or len(df.index) < 3:
+            return df
+
+        df_sorted = df.sort_index()
+        deltas = pd.Series(df_sorted.index).diff().dropna()
+        cadence = deltas.median()
+        if pd.isna(cadence) or cadence <= pd.Timedelta(0):
+            return df_sorted
+
+        full_index = pd.date_range(df_sorted.index.min(), df_sorted.index.max(), freq=cadence)
+        if len(full_index) > len(df_sorted) * 20:
+            return df_sorted
+
+        return df_sorted.reindex(full_index)
+
     def load_data(self, data_file):
         temp_df = data_file.df.copy()
         temp_df = temp_df.clip(lower=1e-4)
@@ -266,16 +283,23 @@ class SummaryPanel(QWidget):
         self.ax_contour.clear()
         self.ax_line.clear()
         self.line_total_n = None
-        
-        pnsd = self.df.to_numpy()
-        pnsd_safe = np.clip(pnsd, 1e-4, None)
+
+        plot_df = self._insert_time_gaps_for_plot(self.df)
+        pnsd = plot_df.to_numpy(dtype=float)
+        pnsd_safe = np.where(np.isnan(pnsd), np.nan, np.clip(pnsd, 1e-4, None))
+        finite_vals = pnsd_safe[np.isfinite(pnsd_safe)]
+        if finite_vals.size == 0:
+            return
         
         v_min = float(self.cbar_min.text()) if self.cbar_min.text() else 1.0
-        v_max = float(self.cbar_max.text()) if self.cbar_max.text() else np.nanmax(pnsd_safe)
+        v_max = float(self.cbar_max.text()) if self.cbar_max.text() else np.nanmax(finite_vals)
         if v_max <= v_min: v_max = v_min * 10
+
+        cmap = cm.get_cmap(self.cmap_combo.currentText()).copy()
+        cmap.set_bad(color='white')
         
-        mesh = self.ax_contour.pcolormesh(self.df.index, self.diams, pnsd_safe.T, 
-                                   cmap=self.cmap_combo.currentText(), 
+        mesh = self.ax_contour.pcolormesh(plot_df.index, self.diams, pnsd_safe.T, 
+                                   cmap=cmap, 
                                    shading='auto', 
                                    norm=LogNorm(vmin=v_min, vmax=v_max))
         
@@ -295,16 +319,22 @@ class SummaryPanel(QWidget):
         cb_ax.patch.set_alpha(0.7)
         
         self.ax_contour.set_yscale('log')
-        self.ax_contour.set_xlim(self.df.index.min(), self.df.index.max())
+        self.ax_contour.set_xlim(plot_df.index.min(), plot_df.index.max())
         self.ax_contour.xaxis_date()
         
         locator = mdates.AutoDateLocator()
         self.ax_contour.xaxis.set_major_locator(locator)
         self.ax_contour.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
         self.ax_contour.set_ylabel("Diameter (nm)")
-        
-        total_n = np.nansum(pnsd, axis=1) * dlogdp if dlogdp > 0 else np.zeros(len(pnsd))
-        self.total_n_series = pd.Series(total_n, index=self.df.index)
+
+        if dlogdp > 0:
+            total_n = np.nansum(pnsd, axis=1) * dlogdp
+        else:
+            total_n = np.zeros(len(pnsd))
+        all_missing_rows = np.all(np.isnan(pnsd), axis=1)
+        total_n = total_n.astype(float)
+        total_n[all_missing_rows] = np.nan
+        self.total_n_series = pd.Series(total_n, index=plot_df.index)
         
         self._update_top_line()
         
@@ -318,8 +348,8 @@ class SummaryPanel(QWidget):
         if xlim is None: delta_days = (self.total_n_series.index.max() - self.total_n_series.index.min()).days
         else: delta_days = xlim[1] - xlim[0]
 
-        if delta_days > 365: resampled = self.total_n_series.resample('ME').mean().dropna()
-        elif delta_days > 31: resampled = self.total_n_series.resample('D').mean().dropna()
+        if delta_days > 365: resampled = self.total_n_series.resample('ME').mean()
+        elif delta_days > 31: resampled = self.total_n_series.resample('D').mean()
         else: resampled = self.total_n_series
 
         x_data = mdates.date2num(resampled.index)
