@@ -424,6 +424,17 @@ class NPFDeepLearningPanel(QWidget):
         info.setText(text)
         info.exec()
 
+    def _get_active_df(self):
+        # Returns the current day dataframe, or current + subsequent calendar day when 48h mode is enabled.
+        plot_df = self.day_df
+        if getattr(self, 'chk_48h', None) and self.chk_48h.isChecked() and self.df is not None and not self.day_df.empty:
+            day0 = self.day_df.index[0].normalize()
+            day1 = day0 + pd.Timedelta(days=1)
+            next_df = self.df[self.df.index.normalize() == day1]
+            if not next_df.empty:
+                plot_df = pd.concat([self.day_df, next_df]).sort_index()
+        return plot_df
+
     def _update_ascii_art(self, pct, text):
         monkey = f"""
          {'_' * (len(text) + 2)}
@@ -542,6 +553,11 @@ class NPFDeepLearningPanel(QWidget):
         nav_layout.addWidget(QLabel("dlogDp:"))                              
         self.val_dlogdp = QLineEdit(""); self.val_dlogdp.setFixedWidth(40)   
         nav_layout.addWidget(self.val_dlogdp)                                
+
+        self.chk_48h = QCheckBox("48h Mode")
+        self.chk_48h.setToolTip("Show current day + subsequent day for manual mode fitting")
+        self.chk_48h.stateChanged.connect(lambda: self.update_day())
+        nav_layout.addWidget(self.chk_48h)
         
         self.btn_redraw = QPushButton("Redraw")
         self.btn_redraw.clicked.connect(self.update_heatmap)
@@ -709,9 +725,13 @@ class NPFDeepLearningPanel(QWidget):
         
         npf_mask = results['class'] == 'NPF'
         npf_results = results[npf_mask]
-        self.daily_groups = [(idx, self.df[self.df.index.normalize() == idx.normalize()])
-                             for idx in npf_results.index
-                             if len(self.df[self.df.index.normalize() == idx.normalize()]) > 0]
+        # Match by calendar date to avoid tz-aware vs tz-naive normalize() mismatches.
+        self.daily_groups = []
+        for idx in npf_results.index:
+            day_mask = (self.df.index.date == idx.date())
+            day_df = self.df[day_mask]
+            if len(day_df) > 0:
+                self.daily_groups.append((idx, day_df))
 
         if self.daily_groups:
             self.date_dropdown.blockSignals(True)
@@ -777,8 +797,9 @@ class NPFDeepLearningPanel(QWidget):
         self.ax_hm.clear(); self.ax_hm_line.clear(); self.ax_hm_line.patch.set_visible(False)
         self.ax_hm.set_zorder(1); self.ax_hm_line.set_zorder(2)
         
-        dates = mdates.date2num(self.day_df.index)
-        pnsd_safe = np.clip(self.day_df.to_numpy(), 1e-4, None)
+        plot_df = self._get_active_df()
+        dates = mdates.date2num(plot_df.index)
+        pnsd_safe = np.clip(plot_df.to_numpy(), 1e-4, None)
         
         try: v_min = float(self.cbar_min.text())
         except ValueError: v_min = 1.0
@@ -789,9 +810,14 @@ class NPFDeepLearningPanel(QWidget):
         self.ax_hm.pcolormesh(dates, self.diams, pnsd_safe.T, cmap=self.cmap_combo.currentText(), shading='nearest', norm=LogNorm(vmin=v_min, vmax=v_max))
         self.ax_hm.set_yscale('log'); self.ax_hm.set_ylabel("Diameter (nm)")
         if len(dates) > 1: self.ax_hm.set_xlim([dates[0], dates[-1]])
-        self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(interval=4))
+        self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(byhour=[0, 6, 12, 18]))
         self.ax_hm.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
         self.ax_hm.set_ylim([self.diams.min(), self.diams.max()])
+
+        if self.chk_48h.isChecked() and not plot_df.empty:
+            midnight_split = plot_df.index[0].normalize() + pd.Timedelta(days=1)
+            if plot_df.index.min() <= midnight_split <= plot_df.index.max():
+                self.ax_hm.axvline(mdates.date2num(midnight_split), color='black', linestyle='--', linewidth=1.0, alpha=0.7, zorder=5)
         
         log_d = np.log10(self.diams); dlogdp = np.mean(np.diff(log_d)) if len(log_d) > 1 else 1.0
         tot_n = np.sum(pnsd_safe, axis=1) * dlogdp
@@ -848,13 +874,14 @@ class NPFDeepLearningPanel(QWidget):
     def _run_mode_fitting(self):
         if not getattr(self, 'last_box_bounds', None): return
         t_min, t_max, d_min, d_max = self.last_box_bounds
-        
-        dates = mdates.date2num(self.day_df.index)
+
+        plot_df = self._get_active_df()
+        dates = mdates.date2num(plot_df.index)
         t_mask = (dates >= t_min) & (dates <= t_max)
         d_mask = (self.diams >= d_min) & (self.diams <= d_max)
         if not np.any(t_mask) or not np.any(d_mask): return
-        
-        subset_pnsd = self.day_df.iloc[t_mask, d_mask].to_numpy()
+
+        subset_pnsd = plot_df.iloc[t_mask, d_mask].to_numpy()
         sub_dates = dates[t_mask]
         active_diams = self.diams[d_mask]
         limit_jump = self.chk_limit_jump.isChecked()
@@ -893,7 +920,8 @@ class NPFDeepLearningPanel(QWidget):
         if getattr(self, 'refining_modes', False):
             if not getattr(self, 'last_box_bounds', None): return
             t_min, t_max, _, _ = self.last_box_bounds
-            dates = mdates.date2num(self.day_df.index)
+            plot_df = self._get_active_df()
+            dates = mdates.date2num(plot_df.index)
             sub_dates = dates[(dates >= t_min) & (dates <= t_max)] 
             
             if len(sub_dates) == 0: return

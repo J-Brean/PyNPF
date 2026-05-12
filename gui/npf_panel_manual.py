@@ -605,7 +605,7 @@ class NPFPanel(QWidget):
     def _get_active_df(self):
         # Returns the dataframe for the current day, or 48h if enabled
         plot_df = self.day_df
-        if self.chk_two_day.isChecked() and self.current_day_idx < len(self.daily_groups) - 1:
+        if self.chk_48h.isChecked() and self.current_day_idx < len(self.daily_groups) - 1:
             _, next_df = self.daily_groups[self.current_day_idx + 1]
             plot_df = pd.concat([self.day_df, next_df])
         return plot_df
@@ -717,9 +717,6 @@ class NPFPanel(QWidget):
         nav_layout.addWidget(self.cbar_max)
         
         nav_layout.addSpacing(10)
-        self.chk_two_day = QCheckBox("48h View"); self.chk_two_day.setChecked(True)
-        self.chk_two_day.stateChanged.connect(self.update_heatmap)
-        nav_layout.addWidget(self.chk_two_day)
         
         nav_layout.addWidget(QLabel("Dp Min:")); self.ymin_dp = QLineEdit(""); self.ymin_dp.setFixedWidth(30)
         nav_layout.addWidget(self.ymin_dp)
@@ -921,14 +918,6 @@ class NPFPanel(QWidget):
         if not self.daily_groups: return
         date_obj, self.day_df = self.daily_groups[self.current_day_idx]
         
-        # 48h mode: concatenate the next day's data if available
-        if getattr(self, 'chk_48h', None) and self.chk_48h.isChecked():
-            if self.current_day_idx < len(self.daily_groups) - 1:
-                _, next_day_df = self.daily_groups[self.current_day_idx + 1]
-                self.day_df = pd.concat([self.day_df, next_day_df])
-            else:
-                self.chk_48h.setChecked(False)  # can't extend past last day
-        
         self.date_dropdown.blockSignals(True)
         self.date_dropdown.setCurrentIndex(self.current_day_idx)
         self.date_dropdown.blockSignals(False)
@@ -958,18 +947,47 @@ class NPFPanel(QWidget):
         
         # Get active dataframe (24h or 48h)
         plot_df = self._get_active_df()
-        is_48h = self.chk_two_day.isChecked()
+        is_48h = self.chk_48h.isChecked()
+        if plot_df is None or plot_df.empty:
+            return
+
+        # Keep time axis monotonic and build a complete timeline for the active window.
+        # Important: preserve timezone-awareness to avoid reindexing everything to NaN.
+        plot_df = plot_df.sort_index()
+
+        start_ts = plot_df.index[0]
+        day0 = start_ts.normalize()
+        day_end = day0 + pd.Timedelta(days=2 if (is_48h and self.current_day_idx < len(self.daily_groups) - 1) else 1)
+
+        if len(plot_df.index) > 1:
+            dt = pd.Series(plot_df.index).diff().median()
+            if pd.isna(dt) or dt <= pd.Timedelta(0):
+                dt = pd.Timedelta(minutes=10)
+        else:
+            dt = pd.Timedelta(minutes=10)
+
+        full_index = pd.date_range(day0, day_end, freq=dt, tz=plot_df.index.tz)
+        plot_df = plot_df.reindex(full_index)
             
         dates = mdates.date2num(plot_df.index)
-        pnsd_safe = np.clip(plot_df.to_numpy(), 1e-4, None)
+        pnsd = plot_df.to_numpy(dtype=float)
+        pnsd_safe = np.where(np.isnan(pnsd), np.nan, np.clip(pnsd, 1e-4, None))
+        finite_vals = pnsd_safe[np.isfinite(pnsd_safe)]
+        if finite_vals.size == 0:
+            self.ax_hm.text(0.5, 0.5, "No plottable data in this window", transform=self.ax_hm.transAxes,
+                            ha='center', va='center', fontsize=11)
+            self.canvas_hm.draw()
+            return
         
         try: v_min = float(self.cbar_min.text())
         except ValueError: v_min = 1.0
         try: v_max = float(self.cbar_max.text())
-        except ValueError: v_max = pnsd_safe.max()
+        except ValueError: v_max = float(np.nanmax(finite_vals))
         if v_max <= v_min: v_max = v_min * 10
         
-        mesh = self.ax_hm.pcolormesh(dates, self.diams, pnsd_safe.T, cmap=self.cmap_combo.currentText(), shading='nearest', norm=LogNorm(vmin=v_min, vmax=v_max))
+        cmap = plt.get_cmap(self.cmap_combo.currentText()).copy()
+        cmap.set_bad(color='white')
+        mesh = self.ax_hm.pcolormesh(dates, self.diams, pnsd_safe.T, cmap=cmap, shading='nearest', norm=LogNorm(vmin=v_min, vmax=v_max))
         self.ax_hm.set_yscale('log'); self.ax_hm.set_ylabel("Diameter (nm)")
         
         if not hasattr(self, 'cbar_hm'):
@@ -980,15 +998,26 @@ class NPFPanel(QWidget):
             except:
                 self.cbar_hm = self.fig_hm.colorbar(mesh, ax=self.ax_hm, label="dN/dlogDp")
 
-        if len(dates) > 1: self.ax_hm.set_xlim([dates[0], dates[-1]])
-        
-        # Adjust tick interval based on 24h vs 48h
-        if is_48h:
-            self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(interval=6))
-            self.ax_hm.xaxis.set_major_formatter(mdates.DateFormatter('%d %H:%M'))
+        # Set xlim anchored to calendar midnight so ticks fall exactly on 00/06/12/18/24
+        # Extend a half-timestep beyond the data so first/last bins are fully visible.
+        if len(dates) > 1:
+            half_step = (dates[1] - dates[0]) / 2.0
         else:
-            self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(interval=4))
-            self.ax_hm.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+            half_step = 0.5 / 24.0
+
+        x_start = mdates.date2num(day0) - half_step
+        x_end   = mdates.date2num(day_end) + half_step
+        self.ax_hm.set_xlim([x_start, x_end])
+
+        # In 48h mode, mark midnight between the two days.
+        if is_48h and self.current_day_idx < len(self.daily_groups) - 1:
+            midnight_split = mdates.date2num(day0 + pd.Timedelta(days=1))
+            self.ax_hm.axvline(midnight_split, color='black', linestyle='--', linewidth=1.0, alpha=0.7, zorder=5)
+
+        # Ticks at 00:00, 06:00, 12:00, 18:00 for every day shown.
+        # Keep labels time-only in both 24h and 48h modes.
+        self.ax_hm.xaxis.set_major_locator(mdates.HourLocator(byhour=[0, 6, 12, 18]))
+        self.ax_hm.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
             
         # Apply manual Y-limits if possible
         try: 

@@ -39,6 +39,17 @@ def fmt_to_strptime(token_fmt: str) -> str:
         result = result.replace(token, code)
     return result
 
+def strip_time_tokens(token_fmt: str) -> str:
+    """Return a date-only token format by removing trailing time tokens."""
+    if not token_fmt:
+        return token_fmt
+    fmt = token_fmt.strip()
+    # Remove common trailing time portions (e.g. " HH:mm:ss", " HH:mm")
+    for suffix in (" HH:mm:ss", " HH:mm", "THH:mm:ss", "THH:mm"):
+        if fmt.endswith(suffix):
+            return fmt[: -len(suffix)].strip()
+    return fmt
+
 @dataclass
 class DataFile:
     path: Path
@@ -192,13 +203,27 @@ def load_pnsd_file(
         return result
     dt_col = col_match[0]
 
-    try: 
-        parsed_dates = pd.to_datetime(raw[dt_col].str.strip(), format=fmt_to_strptime(date_fmt), errors="coerce")
-        
-        # If most timestamps failed to parse (e.g. they contain embedded tz like +02:00 but format has no %z),
-        # fall back to pandas auto-inference which handles tz-aware strings natively.
-        if parsed_dates.isna().mean() > 0.5:
-            parsed_dates = pd.to_datetime(raw[dt_col].str.strip(), errors="coerce", utc=False)
+    try:
+        raw_dt = raw[dt_col].astype(str).str.strip()
+        parsed_dates = pd.to_datetime(raw_dt, format=fmt_to_strptime(date_fmt), errors="coerce")
+
+        # If format includes time but some rows are date-only (common midnight export),
+        # reparse only failed rows using the date-only part; pandas fills 00:00:00.
+        if parsed_dates.isna().any() and ("HH" in str(date_fmt) or "%H" in fmt_to_strptime(date_fmt)):
+            date_only_fmt = strip_time_tokens(date_fmt)
+            if date_only_fmt != date_fmt:
+                missing_mask = parsed_dates.isna()
+                reparsed = pd.to_datetime(
+                    raw_dt[missing_mask],
+                    format=fmt_to_strptime(date_only_fmt),
+                    errors="coerce"
+                )
+                parsed_dates.loc[missing_mask] = reparsed
+
+        # If many timestamps still fail (e.g. embedded tz like +02:00, mixed separators),
+        # fall back to pandas auto-inference which handles mixed forms more robustly.
+        if parsed_dates.isna().mean() > 0.2:
+            parsed_dates = pd.to_datetime(raw_dt, errors="coerce", utc=False)
         
         raw[dt_col] = parsed_dates
         raw_good = raw.dropna(subset=[dt_col]).copy() # Safely drop bad dates BEFORE timezone conversion

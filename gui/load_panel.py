@@ -670,7 +670,7 @@ class LoadPanel(QWidget):
         action_row.addWidget(self.harmonise_btn) 
         action_row.addWidget(self._info_btn("Interpolates selected datasets onto a common set of diameters via cubic splines.", "Harmonise Dp")) 
         
-        save_btn = QPushButton("Export Active Preview to CSV")
+        save_btn = QPushButton("Export Active Datafile to CSV")
         save_btn.clicked.connect(self._export_csv)
         action_row.addWidget(save_btn)
         action_row.addStretch()
