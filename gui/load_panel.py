@@ -367,6 +367,109 @@ class DateTimeFilterDialog(QDialog):
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
+# Diameter Filter Dialog
+# ─────────────────────────────────────────────────────────────────────────── #
+class DiameterFilterDialog(QDialog):
+    def __init__(self, df: pd.DataFrame, diams: list, parent=None):
+        super().__init__(parent)
+        self.df = df
+        self.diams = np.array(diams, dtype=float)
+
+        self.setWindowTitle("Filter Diameters")
+        self.resize(900, 620)
+
+        layout = QVBoxLayout(self)
+
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(QLabel("Min Dp (nm):"))
+        self.min_input = QLineEdit(f"{self.diams.min():.2f}")
+        self.min_input.setFixedWidth(90)
+        self.min_input.textChanged.connect(self.update_plot)
+        ctrl.addWidget(self.min_input)
+
+        ctrl.addWidget(QLabel("Max Dp (nm):"))
+        self.max_input = QLineEdit(f"{self.diams.max():.2f}")
+        self.max_input.setFixedWidth(90)
+        self.max_input.textChanged.connect(self.update_plot)
+        ctrl.addWidget(self.max_input)
+        ctrl.addStretch()
+        layout.addLayout(ctrl)
+
+        self.fig = Figure(figsize=(8, 4))
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        layout.addWidget(self.canvas)
+
+        self.stats_lbl = QLabel()
+        self.stats_lbl.setStyleSheet("font-weight: bold; color: #333;")
+        layout.addWidget(self.stats_lbl)
+
+        btns = QHBoxLayout()
+        self.btn_apply = QPushButton("✨ Apply Diameter Filter")
+        self.btn_apply.setStyleSheet("font-weight: bold; background-color: #c4d1ba; padding: 8px;")
+        self.btn_apply.clicked.connect(self.accept)
+        btns.addStretch()
+        btns.addWidget(self.btn_apply)
+        layout.addLayout(btns)
+
+        self._mask = np.ones_like(self.diams, dtype=bool)
+        self.update_plot()
+
+    def _read_bounds(self):
+        try:
+            dmin = float(self.min_input.text())
+            dmax = float(self.max_input.text())
+        except ValueError:
+            return None, None
+        if dmax < dmin:
+            dmin, dmax = dmax, dmin
+        return dmin, dmax
+
+    def update_plot(self):
+        self.fig.clear()
+        ax = self.fig.add_subplot(111)
+        ax.set_xscale('log')
+        ax.set_yscale('log')
+        ax.set_xlabel("Diameter (nm)")
+        ax.set_ylabel("Mean dN/dlogDp")
+        ax.set_title("Diameter Filter Preview")
+
+        mean_all = np.clip(self.df.mean(skipna=True).to_numpy(dtype=float), 1e-6, None)
+        ax.plot(self.diams, mean_all, color='gray', alpha=0.45, lw=1.5, label='All diameters')
+
+        dmin, dmax = self._read_bounds()
+        if dmin is None:
+            self.stats_lbl.setText("Enter valid numeric min/max diameters.")
+            self.canvas.draw()
+            return
+
+        self._mask = (self.diams >= dmin) & (self.diams <= dmax)
+
+        if dmin > self.diams.min():
+            ax.axvspan(self.diams.min(), dmin, color='red', alpha=0.12)
+        if dmax < self.diams.max():
+            ax.axvspan(dmax, self.diams.max(), color='red', alpha=0.12)
+
+        if self._mask.any():
+            kept = np.where(self._mask, mean_all, np.nan)
+            ax.plot(self.diams, kept, color='blue', lw=2.0, label='Kept range')
+
+        cut_mask = ~self._mask
+        if cut_mask.any():
+            ax.scatter(self.diams[cut_mask], mean_all[cut_mask], color='red', s=12, alpha=0.7, label='Cut bins')
+
+        kept_n = int(self._mask.sum())
+        total_n = int(len(self._mask))
+        self.stats_lbl.setText(f"Keeping {kept_n}/{total_n} diameter bins ({100*kept_n/max(total_n,1):.1f}%).")
+
+        ax.legend(fontsize=8)
+        self.fig.tight_layout()
+        self.canvas.draw()
+
+    def get_kept_mask(self):
+        return self._mask
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 # Load Panel Main Class
 # ─────────────────────────────────────────────────────────────────────────── #
 
@@ -608,6 +711,9 @@ class LoadPanel(QWidget):
         dt_btn = QPushButton("⏰ Filter by Date/Time")
         dt_btn.clicked.connect(self._run_datetime_filter)
         dt_row.addWidget(dt_btn)
+        dp_btn = QPushButton("📏 Filter Diameters")
+        dp_btn.clicked.connect(self._run_diameter_filter)
+        dt_row.addWidget(dp_btn)
         dt_row.addWidget(self._info_btn("Filter data by custom date range, day of week, month, hour of day, or year.", "Date/Time Filter"))
         dt_row.addStretch()
         corr_layout.addLayout(dt_row)
@@ -1096,6 +1202,40 @@ class LoadPanel(QWidget):
             
             self._populate_preview(filtered_df, diams, f"Date/Time Filtered ({n_removed} rows removed)")
             QMessageBox.information(self, "Filter Applied", f"Successfully filtered data. Removed {n_removed} rows. ✂️")
+
+    def _run_diameter_filter(self):
+        """Open the diameter filter dialog and keep a chosen sub-range of Dp bins."""
+        df, diams = self._get_active_data()
+        if df is None or diams is None or len(diams) == 0:
+            return
+
+        dlg = DiameterFilterDialog(df, diams, self)
+        if dlg.exec():
+            keep_mask = dlg.get_kept_mask()
+            if keep_mask is None or int(np.sum(keep_mask)) < 1:
+                QMessageBox.warning(self, "Filter Diameters", "No diameter bins selected.")
+                return
+
+            if len(keep_mask) != len(df.columns):
+                QMessageBox.warning(self, "Filter Diameters", "Diameter/bin mismatch; could not apply filter.")
+                return
+
+            keep_cols = list(df.columns[keep_mask]) if hasattr(df.columns, '__getitem__') else [c for i, c in enumerate(df.columns) if keep_mask[i]]
+            filtered_df = df.loc[:, keep_cols].copy()
+            kept_diams = [float(d) for d in np.array(diams, dtype=float)[keep_mask]]
+
+            if self._active_preview_path and self._active_preview_path.startswith("MERGED_"):
+                self._results[self._active_preview_path].df = filtered_df
+                self._results[self._active_preview_path].diameters = kept_diams
+                self._results[self._active_preview_path].n_bins = len(kept_diams)
+            elif self._active_preview_path in self._results:
+                self._results[self._active_preview_path].df = filtered_df
+                self._results[self._active_preview_path].diameters = kept_diams
+                self._results[self._active_preview_path].n_bins = len(kept_diams)
+
+            self._update_dlogdp_box(kept_diams)
+            self._populate_preview(filtered_df, kept_diams, f"Diameter filtered ({len(kept_diams)} bins kept)")
+            QMessageBox.information(self, "Filter Diameters", f"Kept {len(kept_diams)} diameter bins.")
 
     def _execute_merge(self, mode: str):
         if len(self._selected_paths) >= 2:
