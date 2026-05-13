@@ -608,6 +608,25 @@ class LoadPanel(QWidget):
         self._drop_cols.setPlaceholderText("Comma sep...")
         row3.addWidget(self._drop_cols)
         import_layout.addLayout(row3)
+
+        row_flag = QHBoxLayout()
+        row_flag.addWidget(QLabel("Flag Col:"))
+        row_flag.addWidget(self._info_btn(
+            "Optional: name of a 'flag' column in your CSV.\n"
+            "Rows where that column equals the Error Value will be deleted before any other processing.\n"
+            "Leave blank to skip. Default error value is 1 (e.g. 0 = clean, 1 = flagged).",
+            "Error Flag Filtering"
+        ))
+        self._flag_col = QLineEdit()
+        self._flag_col.setPlaceholderText("e.g., flag")
+        row_flag.addWidget(self._flag_col)
+
+        row_flag.addWidget(QLabel("Error Value:"))
+        self._flag_val = QLineEdit("1")
+        self._flag_val.setFixedWidth(50)
+        row_flag.addWidget(self._flag_val)
+        row_flag.addStretch()
+        import_layout.addLayout(row_flag)
         
         apply_btn = QPushButton("Apply to all loaded files")
         apply_btn.clicked.connect(self._apply_global_to_all)
@@ -891,6 +910,9 @@ class LoadPanel(QWidget):
         drop = entry.effective_drop(g_drop)
         na_text = entry.effective_na(g_na)
         res_val, res_unit = entry.effective_resample(g_res_val, g_res_unit)
+
+        g_flag_col = self._flag_col.text().strip()
+        g_flag_val = self._flag_val.text().strip() or "1"
         
         na_map = {"Drop Rows": "drop", "Fill (Fwd/Bwd)": "ffill", "Interpolate": "interpolate", "Fill Min (1e0)": "zero"}
         na_method = na_map.get(na_text, "drop")
@@ -899,7 +921,7 @@ class LoadPanel(QWidget):
         if res_val.isdigit():
             resample_rule = f"{res_val}min" if res_unit == "Minutes" else f"{res_val}h" if res_unit == "Hours" else f"{res_val}D"
             
-        result = load_pnsd_file(path, col, fmt, resample_rule, na_method, tz, drop)
+        result = load_pnsd_file(path, col, fmt, resample_rule, na_method, tz, drop, g_flag_col, g_flag_val)
         self._results[path] = result
         entry.set_result(result)
         

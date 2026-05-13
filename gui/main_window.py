@@ -20,6 +20,7 @@ from gui.cluster_panel import ClusterPanel
 from gui.nano_ranking_panel import NanoRankingPanel
 from gui.wind_panel import WindPanel
 from gui.pmf_panel import PMFPanel
+from gui.pollution_flag_panel import PollutionFlagPanel
                                                  # Required for merging
 from utils.data_loader import DataFile                               # Required to create merged object
 
@@ -129,6 +130,7 @@ class MainWindow(QMainWindow):
         self.nano_ranking_panel = NanoRankingPanel(self)
         self.wind_panel = WindPanel(self)
         self.pmf_panel = PMFPanel(self)
+        self.pollution_flag_panel = PollutionFlagPanel(self)
 
         self.load_panel.data_confirmed.connect(self._on_data_confirmed)
         
@@ -142,6 +144,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.nano_ranking_panel, "7 · Nano Ranking")
         self.tabs.addTab(self.wind_panel, "8 · Wind Analysis")                          # Fixed numbering
         self.tabs.addTab(self.pmf_panel, "9 · PMF Analysis")
+        self.tabs.addTab(self.pollution_flag_panel, "10 · Pollution Flags")
 
         self.setCentralWidget(self.tabs)
 
@@ -168,6 +171,7 @@ class MainWindow(QMainWindow):
             self.nano_ranking_panel.load_data(merged_data)
             self.wind_panel.load_data(merged_data)
             self.pmf_panel.load_data(merged_data)
+            self.pollution_flag_panel.load_data(merged_data)
 
             self.tabs.setCurrentIndex(2)                                               # Switch to Summary tab
 
@@ -196,6 +200,7 @@ class MainWindow(QMainWindow):
             self.nano_ranking_panel.load_data(merged_data)
             self.wind_panel.load_data(merged_data)
             self.pmf_panel.load_data(merged_data)
+            self.pollution_flag_panel.load_data(merged_data)
 
 
 

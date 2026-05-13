@@ -184,7 +184,8 @@ def align_bins(df_source: pd.DataFrame, diams_source: np.ndarray, diams_target: 
 def load_pnsd_file(
     path: str, date_col: str = DEFAULT_DATE_COL, date_fmt: str = DEFAULT_DATE_FMT,
     resample_rule: Optional[str] = None, na_method: str = "drop",
-    timezone: str = "UTC", cols_to_drop: str = ""
+    timezone: str = "UTC", cols_to_drop: str = "",
+    flag_col: str = "", flag_value: str = "1"
 ) -> DataFile:
     p = Path(path)
     result = DataFile(path=p, date_col=date_col, date_fmt=date_fmt)
@@ -236,6 +237,18 @@ def load_pnsd_file(
             raw_good[dt_col] = raw_good[dt_col].dt.tz_convert(timezone)
             
         raw_good = raw_good.dropna(subset=[dt_col]).set_index(dt_col)
+
+        # --- Flag column filtering (must happen before diam_cols detection) ---
+        if flag_col.strip():
+            fc_match = [c for c in raw_good.columns if c.strip().lower() == flag_col.strip().lower()]
+            if fc_match:
+                flag_series = pd.to_numeric(raw_good[fc_match[0]], errors='coerce')
+                try:
+                    flag_val_num = float(flag_value)
+                    raw_good = raw_good[flag_series != flag_val_num]
+                except ValueError:
+                    raw_good = raw_good[raw_good[fc_match[0]].astype(str).str.strip() != flag_value.strip()]
+
         raw_good.index.name = "datetime"
     except Exception as exc: 
         result.error = f"Date parsing failed: {exc}"
